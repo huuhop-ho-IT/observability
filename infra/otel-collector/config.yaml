@@ -1,0 +1,103 @@
+# OTel Collector: the telemetry hub.
+# Receives OTLP from the app -> processes it (filter, batch, enrich, redact) -> routes each signal to its store.
+# Swapping a backend (e.g. Tempo -> Jaeger) only touches this file, NOT the app code.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  batch:
+    send_batch_size: 1024
+    timeout: 2s
+
+  # Tag every signal with the environment
+  resource/env:
+    attributes:
+      - key: deployment.environment
+        value: docker-demo
+        action: upsert
+
+  # Drop low-value resource attributes -> lower label cardinality in Prometheus/Loki
+  resource/trim:
+    attributes:
+      - { key: process.command_args, action: delete }
+      - { key: process.command, action: delete }
+      - { key: process.executable.path, action: delete }
+      - { key: process.executable.name, action: delete }
+      - { key: process.owner, action: delete }
+      - { key: process.pid, action: delete }
+      - { key: process.runtime.description, action: delete }
+      - { key: process.runtime.name, action: delete }
+      - { key: host.arch, action: delete }
+      - { key: host.name, action: delete }
+
+  # Redact sensitive data: hash userId, drop sensitive headers
+  attributes/redact:
+    actions:
+      - key: userId
+        action: hash
+      - key: http.request.header.authorization
+        action: delete
+
+  # Filter: drop health-check spans
+  filter/drop-health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["url.path"] == "/health"'
+        - 'attributes["http.target"] == "/health"'
+
+exporters:
+  # Traces -> Tempo
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Metrics -> expose an endpoint for Prometheus to scrape
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # OpenMetrics exposes *_created timestamps, so Prometheus can insert a synthetic 0 when a
+    # series first appears -> rate()/increase() no longer miss the first burst
+    enable_open_metrics: true
+    resource_to_telemetry_conversion:
+      enabled: true   # service_name, service_instance_id... become labels
+
+  # Logs -> Loki (OTLP native, Loki >= 3.0)
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/drop-health, resource/env, resource/trim, attributes/redact, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/env, resource/trim, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/env, resource/trim, attributes/redact, batch]
+      exporters: [otlphttp/loki]

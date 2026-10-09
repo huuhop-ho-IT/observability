@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p infra/grafana/dashboards)",
+      "Bash(docker compose *)"
+    ]
+  }
+}

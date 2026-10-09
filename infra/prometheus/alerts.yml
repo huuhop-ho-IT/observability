@@ -1,0 +1,25 @@
+groups:
+  - name: cinema-booking
+    rules:
+      - alert: BookingHighP95Latency
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(booking_duration_seconds_bucket[1m]))) > 1
+        for: 10s
+        labels: { severity: warning }
+        annotations:
+          summary: "Booking p95 latency > 1s"
+          description: "Current p95 is {{ $value | humanizeDuration }}. Open Tempo to find slow traces."
+
+      - alert: BookingErrors
+        expr: sum(rate(booking_attempts_total{result="error"}[1m])) > 0
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "Bookings are failing with system errors (5xx)"
+
+      - alert: Overbooking
+        expr: sum(increase(booking_overbooked_total[5m])) > 0
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "Double-sold seats detected (race condition)!"
